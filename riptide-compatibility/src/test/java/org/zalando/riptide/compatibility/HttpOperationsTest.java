@@ -1,6 +1,5 @@
 package org.zalando.riptide.compatibility;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.SneakyThrows;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
@@ -13,15 +12,18 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.http.RequestEntity;
 import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
-import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
+import org.springframework.http.converter.json.JacksonJsonHttpMessageConverter;
 import org.springframework.web.client.RequestCallback;
 import org.springframework.web.client.ResponseExtractor;
 import org.springframework.web.client.RestOperations;
 import org.zalando.riptide.Http;
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.json.JsonMapper;
 
 import javax.annotation.Nullable;
 import java.net.URI;
 import java.util.Arrays;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executors;
@@ -39,6 +41,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.fail;
 import static org.springframework.http.HttpHeaders.CONTENT_TYPE;
 import static org.springframework.http.HttpMethod.DELETE;
 import static org.springframework.http.HttpMethod.GET;
@@ -59,13 +62,15 @@ import static org.zalando.riptide.compatibility.MockWebServerUtil.verify;
 final class HttpOperationsTest {
 
     private final MockWebServer server = new MockWebServer();
-
+    private static final JsonMapper MAPPER = JsonMapper.builder()
+                    .changeDefaultPropertyInclusion(incl -> incl.withValueInclusion(NON_ABSENT))
+                    .build();
+    
     private final Http http = Http.builder()
             .executor(Executors.newSingleThreadExecutor())
             .requestFactory(new HttpComponentsClientHttpRequestFactory())
             .baseUrl(getBaseUrl(server))
-            .converter(new MappingJackson2HttpMessageConverter(
-                    new ObjectMapper().setSerializationInclusion(NON_ABSENT)))
+            .converter(new JacksonJsonHttpMessageConverter(MAPPER))
             .build();
 
     @SneakyThrows
@@ -92,8 +97,8 @@ final class HttpOperationsTest {
 
         final User user = test.apply(new HttpOperations(http));
 
-        assertEquals("D. Fault", user.getName());
-        assertEquals("1984-09-13", user.getBirthday());
+        assertEquals("D. Fault", user.name());
+        assertEquals("1984-09-13", user.birthday());
 
         verify(server, 1, "/users/1");
     }
@@ -256,7 +261,7 @@ final class HttpOperationsTest {
     }
 
     static Iterable<Function<RestOperations, User>> execute() {
-        final ObjectMapper mapper = new ObjectMapper();
+        final JsonMapper mapper = new JsonMapper();
 
         final RequestCallback callback = request -> {
             request.getHeaders().add("Test", "true");
@@ -344,8 +349,18 @@ final class HttpOperationsTest {
     }
 
     private static void verifyRequestBody(RecordedRequest recordedRequest, String expectedBody) {
-        assertEquals(expectedBody, recordedRequest.getBody().readString(UTF_8));
         assertEquals("application/json", recordedRequest.getHeaders().get(CONTENT_TYPE));
+        String requestBody = recordedRequest.getBody().readString(UTF_8);
+        
+        try {
+            Map<String, String> expected = MAPPER.readValue(expectedBody, new TypeReference<>() {});
+            Map<String, String> actual = MAPPER.readValue(requestBody, new TypeReference<>() {});
+            
+            assertEquals(expected, actual,
+                "JSON body mismatch (order-insensitive).\nExpected: " + expected + "\nActual: " + actual);
+        } catch (Exception e) {
+            fail("Failed to parse JSON for comparison: " + e.getMessage(), e);
+        }
     }
 
     private static void verifyRequest(RecordedRequest recordedRequest,
